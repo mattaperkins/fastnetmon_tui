@@ -34,6 +34,10 @@ git clone https://github.com/youruser/fastnetmon_tui.git
 cd fastnetmon_tui
 python3 fastnetmon_tui
 
+
+```
+---
+
 ## Todo
 
 IPv6 support 
