@@ -1,0 +1,165 @@
+.\" fastnetmon_tui — curses VU-style viewer for FastNetMon CLI stats
+.TH FASTNETMON_TUI 1 "2025-09-03" "fastnetmon_tui 1.0" "User Commands"
+.SH NAME
+fastnetmon_tui \- live Unicode bargraph viewer for FastNetMon CLI stats (pps/mbps)
+.SH SYNOPSIS
+.B fastnetmon_tui
+.RI [ \-f\ \fIfile\fR ]
+.RI [ \-i\ \fIinterval\fR ]
+.RI [ \-\-style\ \fIdots|blocks\fR ]
+.br
+.B fastnetmon_tui
+.RI [ \-h ]
+.SH DESCRIPTION
+.B fastnetmon_tui
+is a curses TUI that tails FastNetMon’s periodically updated CLI stats file
+and renders per\-row \fBpps\fR and \fBmbps\fR as colour VU\-style Unicode bar graphs.
+Flows are ignored. The display auto\-rescales with a gentle peak decay so old
+spikes don’t pin the meter.
+
+On startup the program locates the stats file in this order:
+.IP "1." 4
+Path provided with
+.BR \-f .
+.IP "2." 4
+The value of
+.B cli_stats_file_path
+in
+.BR /etc/fastnetmon.conf .
+.IP "3." 4
+Fallback to
+.BR /tmp/fastnetmon.dat .
+
+By default the bar glyph style is \fBdots\fR (U+2022 •). You can switch to solid
+blocks with
+.BR \-\-style\ blocks .
+.SH FEATURES
+.IP \[bu] 2
+Live view of section totals and per\-IP rows for Incoming, Outgoing, Internal, Other.
+.IP \[bu]
+Colour gradient along each bar: green \-> yellow \-> red toward the peak zone.
+.IP \[bu]
+Auto\-scaling with decay; manual reset and rate controls via key bindings.
+.IP \[bu]
+Layout prevents the PPS number from colliding with the Mbps bar; exactly one space separates the PPS text and the Mbps bar.
+.SH CONFIGURATION
+The FastNetMon CLI stats file can be set in:
+.PP
+.nf
+/etc/fastnetmon.conf
+  cli_stats_file_path = /dev/shm/fastnetmon.dat
+.fi
+.PP
+If this key is absent, the program uses
+.BR /tmp/fastnetmon.dat ,
+unless overridden with
+.BR \-f .
+.SH OPTIONS
+.TP
+.BR \-f\ \fIFILE\fR ", " \-\-file=\fIFILE\fR
+Explicit path to the FastNetMon CLI stats file; overrides config and defaults.
+.TP
+.BR \-i\ \fISECONDS\fR ", " \-\-interval=\fISECONDS\fR
+Refresh interval (default: 0.33).
+.TP
+.BR \-\-style= \fIdots|blocks\fR
+Bar glyph style. \fBdots\fR (•) is the default; \fBblocks\fR (█) is the solid alternative.
+.TP
+.BR \-h ", " \-\-help
+Show usage and exit.
+.SH KEYBINDINGS
+While running:
+.TP
+.B q
+Quit.
+.TP
+.B r
+Reset autoscale peaks.
+.TP
+.B a
+Toggle autoscale on/off.
+.TP
+.B +
+Increase refresh rate (shorter interval).
+.TP
+.B \-
+Decrease refresh rate (longer interval).
+.SH COLOURS
+Each bar’s length represents the current value relative to the dynamic maximum,
+while the colour reflects position along the bar:
+.TP
+Green
+0.0–0.7 of full scale
+.TP
+Yellow
+0.7–0.9 of full scale
+.TP
+Red
+\>= 0.9 of full scale
+.PP
+Colours require a terminal that supports ANSI colours via curses.
+.SH INPUT FILE FORMAT
+The viewer expects FastNetMon’s summary format, e.g.:
+.PP
+.nf
+Incoming traffic         10824 pps     80 mbps      0 flows
+202.68.165.53             1856 pps     18 mbps      0 flows
+...
+Outgoing traffic            18 pps      0 mbps      0 flows
+...
+.fi
+.PP
+Only the \fBpps\fR and \fBmbps\fR fields are consumed; \fBflows\fR are ignored.
+.SH EXIT STATUS
+.TP
+.B 0
+Successful execution or clean quit.
+.TP
+.B 1
+Initialisation error (e.g. curses/setup failure).
+.TP
+.B 2
+Configuration parsing error.
+.SH ENVIRONMENT
+.TP
+.B TERM
+Should be a colour\-capable terminal type (e.g. \fBxterm\-256color\fR) for best results.
+.SH FILES
+.TP
+.B /etc/fastnetmon.conf
+FastNetMon configuration file; may define
+.BR cli_stats_file_path .
+.TP
+.B /tmp/fastnetmon.dat
+Default CLI stats file if not configured.
+.SH EXAMPLES
+.TP
+Watch the configured stats file with defaults (dots style):
+.PP
+.nf
+fastnetmon_tui
+.fi
+.TP
+Explicit file and faster refresh:
+.PP
+.nf
+fastnetmon_tui \-f /dev/shm/fastnetmon.dat \-i 0.2
+.fi
+.TP
+Use solid block bars:
+.PP
+.nf
+fastnetmon_tui \-\-style blocks
+.fi
+.SH BUGS
+If nothing appears, verify the stats file path and that your terminal supports curses colours.
+You can also try a different \fBTERM\fR (e.g. \fBxterm\-256color\fR).
+Report issues with a sample of the input file.
+.SH SEE ALSO
+.BR fastnetmon (8),
+.BR terminfo (5)
+.SH AUTHOR
+Written for operational visibility by Matt’s ChatGPT helper. Uses Australian English conventions.
+.SH LICENSE
+This tool and its man page may be used under the MIT licence unless you specify otherwise in your deployment.
+
