@@ -4,7 +4,7 @@ A curses TUI that visualises [FastNetMon](https://fastnetmon.com/) CLI statistic
 It parses the FastNetMon stats file (default `/tmp/fastnetmon.dat` or path configured in `/etc/fastnetmon.conf`) and displays **pps** and **mbps** per section/IP.  
 Flows are ignored.
 
-![demo screenshot](docs/demo.png) <!-- optional screenshot -->
+![demo screenshot](demo.png) <!-- optional screenshot -->
 
 ---
 
