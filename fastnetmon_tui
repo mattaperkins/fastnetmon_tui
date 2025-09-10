@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# fastnetmon_tui.py (IPv4 & IPv6)
+# fastnetmon_tui.py (IPv4 & IPv6) with banned IPs in red + runtime style toggle
 import argparse
 import curses
 import errno
@@ -17,14 +17,12 @@ SECTION_HEAD_RE = re.compile(
     re.I
 )
 
-# IPv4 per-IP line
 IPV4_LINE_RE = re.compile(
     r'^(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\s+'
     r'(?P<pps>\d+)\s+pps\s+'
     r'(?P<mbps>\d+)\s+mbps\b', re.I
 )
 
-# IPv6 per-IP line (tolerant: hex/colons, ignores trailing "flows")
 IPV6_LINE_RE = re.compile(
     r'^(?P<ip>[0-9a-fA-F:]+)\s+'
     r'(?P<pps>\d+)\s+pps\s+'
@@ -38,12 +36,13 @@ V6_KEYS = [
 ]
 
 class Row:
-    __slots__ = ("label", "pps", "mbps", "is_total")
-    def __init__(self, label: str, pps: int, mbps: int, is_total: bool=False):
+    __slots__ = ("label", "pps", "mbps", "is_total", "banned")
+    def __init__(self, label: str, pps: int, mbps: int, is_total: bool=False, banned: bool=False):
         self.label = label
         self.pps = pps
         self.mbps = mbps
         self.is_total = is_total
+        self.banned = banned
 
 def parse_fastnetmon(text: str, ip_line_re: re.Pattern) -> Dict[str, List[Row]]:
     lines = [ln.rstrip() for ln in text.splitlines()]
@@ -61,18 +60,19 @@ def parse_fastnetmon(text: str, ip_line_re: re.Pattern) -> Dict[str, List[Row]]:
                 tot_pps = tot_mbps = 0
             sections[sec_name].append(Row(f"{sec_name} total", tot_pps, tot_mbps, True))
             i += 1
-            # Consume IP rows until blank or next section
             while i < len(lines):
                 if not lines[i].strip():
                     break
                 if SECTION_HEAD_RE.match(lines[i]):
                     break
-                m2 = ip_line_re.match(lines[i])
+                line = lines[i]
+                m2 = ip_line_re.match(line)
                 if m2:
                     ip = m2.group('ip')
                     pps = int(m2.group('pps'))
                     mbps = int(m2.group('mbps'))
-                    sections[sec_name].append(Row(ip, pps, mbps))
+                    banned = "*banned*" in line.lower()
+                    sections[sec_name].append(Row(ip, pps, mbps, False, banned))
                 i += 1
         else:
             i += 1
@@ -88,18 +88,12 @@ def read_file_safely(path: str) -> str:
         raise
 
 def draw_bar(stdscr, y: int, x: int, width: int, ratio: float, style: str):
-    """
-    Draw a VU-style bar with a colour gradient along its length.
-    style: 'blocks' -> '█'  |  'dots' -> '•'
-    """
     width = max(4, width)
     ratio = max(0.0, min(1.0, ratio))
     filled = int(ratio * width)
     glyph = '█' if style == 'blocks' else '•'
-
     for i in range(width):
         pos_ratio = (i + 1) / width
-        # 0–0.7 green, 0.7–0.9 yellow, ≥0.9 red
         cpair = 3 if pos_ratio >= 0.9 else (2 if pos_ratio >= 0.7 else 1)
         ch = glyph if i < filled else ' '
         stdscr.attron(curses.color_pair(cpair))
@@ -111,7 +105,6 @@ def guess_v6_path_from_v4(v4_path: Optional[str]) -> Optional[str]:
         return None
     p = Path(v4_path)
     candidates = []
-    # Common swap-ins
     if p.name == "fastnetmon.dat":
         candidates.append(p.with_name("fastnetmon_ipv6.dat"))
     if p.suffix == ".dat":
@@ -120,16 +113,10 @@ def guess_v6_path_from_v4(v4_path: Optional[str]) -> Optional[str]:
     for c in candidates:
         if c.exists():
             return str(c)
-    # Return the most sensible guess even if not present (so user can see path in header)
     return str(candidates[0]) if candidates else None
 
 def get_dat_file_from_conf(conf_path: str = "/etc/fastnetmon.conf",
                            ipv6: bool = False) -> Optional[str]:
-    """
-    Look for CLI stats file paths in fastnetmon.conf.
-      IPv4: cli_stats_file_path = ...
-      IPv6: first matching key in V6_KEYS
-    """
     if not os.path.isfile(conf_path):
         return None
     v4_val: Optional[str] = None
@@ -147,7 +134,6 @@ def get_dat_file_from_conf(conf_path: str = "/etc/fastnetmon.conf",
                     v6_val = v
     except Exception:
         return None
-
     if ipv6:
         return v6_val or guess_v6_path_from_v4(v4_val)
     return v4_val
@@ -159,11 +145,11 @@ def run_tui(stdscr, path: str, interval: float, style: str,
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_GREEN, -1)
     curses.init_pair(2, curses.COLOR_YELLOW, -1)
-    curses.init_pair(3, curses.COLOR_RED, -1)
+    curses.init_pair(3, curses.COLOR_RED, -1)      # banned IPs
     curses.init_pair(4, curses.COLOR_CYAN, -1)
-    curses.init_pair(5, curses.COLOR_WHITE, -1)
-    curses.init_pair(6, curses.COLOR_MAGENTA, -1)
-    curses.init_pair(7, curses.COLOR_WHITE, -1)
+    curses.init_pair(5, curses.COLOR_WHITE, -1)    # normal label
+    curses.init_pair(6, curses.COLOR_MAGENTA, -1)  # section head
+    curses.init_pair(7, curses.COLOR_WHITE, -1)    # totals
 
     stdscr.nodelay(True)
 
@@ -172,7 +158,9 @@ def run_tui(stdscr, path: str, interval: float, style: str,
     autoscale = True
     max_pps = 1.0
     max_mbps = 1.0
-    decay = 0.98  # peak-decay so old spikes fade
+    decay = 0.98
+
+    current_style = style  # allow toggling at runtime
 
     while True:
         try:
@@ -185,7 +173,6 @@ def run_tui(stdscr, path: str, interval: float, style: str,
 
         sections = parse_fn(content) if content else {"Incoming": [], "Outgoing": [], "Internal": [], "Other": []}
 
-        # Current maxima across all rows
         cur_pps = 1
         cur_mbps = 1
         max_label_len = 0
@@ -204,26 +191,18 @@ def run_tui(stdscr, path: str, interval: float, style: str,
         stdscr.erase()
         h, w = stdscr.getmaxyx()
 
-        # Header
-        title = f"FastNetMon TUI — watching {path}  (q=quit r=reset +/-=rate a=autoscale:{'ON' if autoscale else 'OFF'})  style={style}"
+        title = f"FastNetMon TUI — watching {path}  (q=quit r=reset +/-=rate a=autoscale:{'ON' if autoscale else 'OFF'} s=style:{current_style})"
         stdscr.attron(curses.color_pair(4))
         stdscr.addstr(0, 0, title[:w-1])
         stdscr.attroff(curses.color_pair(4))
 
-        # ---- Layout (label column auto-sizes to longest label, capped)
         left_label_w = max(16, min(60, max_label_len + 1))
-
-        # PPS value column auto-sizes based on current max_pps (with commas)
         pps_digits = len(f"{int(max_pps):,}")
-        pps_val_w = max(12, pps_digits + 4)  # number + space + 'pps'
-        gap_w = 1  # EXACTLY one space between PPS text and the start of the Mbps bar
-
-        # The rest of the line is shared by two bars
-        bar_span = max(10, w - left_label_w - pps_val_w - gap_w - 16)  # 16 ≈ rhs numbers + margins
+        pps_val_w = max(12, pps_digits + 4)
+        gap_w = 1
+        bar_span = max(10, w - left_label_w - pps_val_w - gap_w - 16)
         pps_bar_w = bar_span // 2
         mbps_bar_w = bar_span - pps_bar_w
-
-        # X positions (ensures one space between PPS text and Mbps bar)
         pps_bar_x   = left_label_w + 1
         pps_text_x  = pps_bar_x + pps_bar_w + 1
         mbps_bar_x  = pps_text_x + pps_val_w + gap_w
@@ -247,32 +226,28 @@ def run_tui(stdscr, path: str, interval: float, style: str,
             for r in rows:
                 if row_y >= h - 2:
                     break
-                # label (IP or total)
-                stdscr.attron(curses.color_pair(7) if r.is_total else curses.color_pair(5))
+                if r.is_total:
+                    label_color = 7
+                else:
+                    label_color = 3 if r.banned else 5
+                stdscr.attron(curses.color_pair(label_color))
                 stdscr.addstr(row_y, 0, (r.label + " " * left_label_w)[:left_label_w])
-                stdscr.attroff(curses.color_pair(7) if r.is_total else curses.color_pair(5))
+                stdscr.attroff(curses.color_pair(label_color))
 
-                # ratios
                 p_ratio = r.pps / max(1.0, max_pps)
                 m_ratio = r.mbps / max(1.0, max_mbps)
-
-                # draw bars
-                draw_bar(stdscr, row_y, pps_bar_x,  pps_bar_w,  p_ratio, style)
-                draw_bar(stdscr, row_y, mbps_bar_x, mbps_bar_w, m_ratio, style)
-
-                # numeric overlays in reserved slots
+                draw_bar(stdscr, row_y, pps_bar_x,  pps_bar_w,  p_ratio, current_style)
+                draw_bar(stdscr, row_y, mbps_bar_x, mbps_bar_w, m_ratio, current_style)
                 stdscr.addstr(row_y, pps_text_x,  f"{r.pps:>10,d} pps")
                 stdscr.addstr(row_y, mbps_text_x, f"{r.mbps:>8,d} mbps")
                 row_y += 1
 
-        # Footer
         footer = f"Scale pps:max≈{int(max_pps):,}  mbps:max≈{int(max_mbps):,}  refresh={interval:.2f}s"
         stdscr.attron(curses.color_pair(4))
         stdscr.addstr(h-1, 0, footer[:w-1])
         stdscr.attroff(curses.color_pair(4))
         stdscr.refresh()
 
-        # Input handling
         t_end = time.time() + interval
         while time.time() < t_end:
             ch = stdscr.getch()
@@ -289,6 +264,8 @@ def run_tui(stdscr, path: str, interval: float, style: str,
                 interval = max(0.05, interval * 0.8)
             elif ch == ord('-'):
                 interval = min(5.0, interval * 1.25)
+            elif ch in (ord('s'), ord('S')):
+                current_style = 'blocks' if current_style == 'dots' else 'dots'
 
 def make_parser(ipv6: bool) -> Callable[[str], Dict[str, List[Row]]]:
     ip_re = IPV6_LINE_RE if ipv6 else IPV4_LINE_RE
@@ -304,12 +281,10 @@ def main():
                     help='Bar glyph style: dots (•) or blocks (█). Default: dots')
     args = ap.parse_args()
 
-    # Determine stats file path: CLI arg > config > fallback
     dat_path = args.file
     if dat_path is None:
         dat_path = get_dat_file_from_conf(args.config, ipv6=args.ipv6)
         if dat_path is None:
-            # Final fallbacks
             dat_path = "/tmp/fastnetmon_ipv6.dat" if args.ipv6 else "/tmp/fastnetmon.dat"
 
     parse_fn = make_parser(args.ipv6)
