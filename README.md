@@ -39,4 +39,4 @@ python3 fastnetmon_tui
 ---
 
 ## Todo
-
+add user interface to allow ban/unban 
