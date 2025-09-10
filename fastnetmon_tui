@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# fastnetmon_tui.py
+# fastnetmon_tui.py (IPv4 & IPv6)
 import argparse
 import curses
 import errno
@@ -7,16 +7,35 @@ import locale
 import os
 import re
 import time
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
 
 locale.setlocale(locale.LC_ALL, '')
 
-SECTION_HEAD_RE = re.compile(r'^(Incoming|Outgoing|Internal|Other) traffic\s+(\d+)\s+pps\s+(\d+)\s+mbps', re.I)
-IP_LINE_RE = re.compile(
+SECTION_HEAD_RE = re.compile(
+    r'^(Incoming|Outgoing|Internal|Other)\s+traffic\s+(\d+)\s+pps\s+(\d+)\s+mbps',
+    re.I
+)
+
+# IPv4 per-IP line
+IPV4_LINE_RE = re.compile(
     r'^(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\s+'
     r'(?P<pps>\d+)\s+pps\s+'
     r'(?P<mbps>\d+)\s+mbps\b', re.I
 )
+
+# IPv6 per-IP line (tolerant: hex/colons, ignores trailing "flows")
+IPV6_LINE_RE = re.compile(
+    r'^(?P<ip>[0-9a-fA-F:]+)\s+'
+    r'(?P<pps>\d+)\s+pps\s+'
+    r'(?P<mbps>\d+)\s+mbps\b', re.I
+)
+
+V6_KEYS = [
+    "cli_stats_ipv6_file_path",
+    "cli_stats_file_path_ipv6",
+    "cli_stats_file_path_v6",
+]
 
 class Row:
     __slots__ = ("label", "pps", "mbps", "is_total")
@@ -26,7 +45,7 @@ class Row:
         self.mbps = mbps
         self.is_total = is_total
 
-def parse_fastnetmon(text: str) -> Dict[str, List[Row]]:
+def parse_fastnetmon(text: str, ip_line_re: re.Pattern) -> Dict[str, List[Row]]:
     lines = [ln.rstrip() for ln in text.splitlines()]
     i = 0
     sections: Dict[str, List[Row]] = {"Incoming": [], "Outgoing": [], "Internal": [], "Other": []}
@@ -48,7 +67,7 @@ def parse_fastnetmon(text: str) -> Dict[str, List[Row]]:
                     break
                 if SECTION_HEAD_RE.match(lines[i]):
                     break
-                m2 = IP_LINE_RE.match(lines[i])
+                m2 = ip_line_re.match(lines[i])
                 if m2:
                     ip = m2.group('ip')
                     pps = int(m2.group('pps'))
@@ -87,29 +106,54 @@ def draw_bar(stdscr, y: int, x: int, width: int, ratio: float, style: str):
         stdscr.addstr(y, x + i, ch)
         stdscr.attroff(curses.color_pair(cpair))
 
-def get_dat_file_from_conf(conf_path: str = "/etc/fastnetmon.conf") -> Optional[str]:
+def guess_v6_path_from_v4(v4_path: Optional[str]) -> Optional[str]:
+    if not v4_path:
+        return None
+    p = Path(v4_path)
+    candidates = []
+    # Common swap-ins
+    if p.name == "fastnetmon.dat":
+        candidates.append(p.with_name("fastnetmon_ipv6.dat"))
+    if p.suffix == ".dat":
+        candidates.append(p.with_name(p.stem + "_ipv6.dat"))
+    candidates.append(p.with_name("fastnetmon_ipv6.dat"))
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    # Return the most sensible guess even if not present (so user can see path in header)
+    return str(candidates[0]) if candidates else None
+
+def get_dat_file_from_conf(conf_path: str = "/etc/fastnetmon.conf",
+                           ipv6: bool = False) -> Optional[str]:
     """
-    Look for `cli_stats_file_path = ...` in fastnetmon.conf.
-    Return the path if found, else None.
+    Look for CLI stats file paths in fastnetmon.conf.
+      IPv4: cli_stats_file_path = ...
+      IPv6: first matching key in V6_KEYS
     """
     if not os.path.isfile(conf_path):
         return None
+    v4_val: Optional[str] = None
+    v6_val: Optional[str] = None
     try:
         with open(conf_path, "r", encoding="utf-8", errors="ignore") as f:
             for raw in f:
                 line = raw.strip()
-                if not line or line.startswith("#"):
+                if not line or line.startswith("#") or "=" not in line:
                     continue
-                if line.startswith("cli_stats_file_path"):
-                    parts = line.split("=", 1)
-                    if len(parts) == 2:
-                        val = parts[1].strip()
-                        return val if val else None
+                k, v = map(str.strip, line.split("=", 1))
+                if k == "cli_stats_file_path" and v and not v4_val:
+                    v4_val = v
+                if k in V6_KEYS and v and not v6_val:
+                    v6_val = v
     except Exception:
         return None
-    return None
 
-def run_tui(stdscr, path: str, interval: float, style: str):
+    if ipv6:
+        return v6_val or guess_v6_path_from_v4(v4_val)
+    return v4_val
+
+def run_tui(stdscr, path: str, interval: float, style: str,
+            parse_fn: Callable[[str], Dict[str, List[Row]]]):
     curses.curs_set(0)
     curses.start_color()
     curses.use_default_colors()
@@ -139,15 +183,17 @@ def run_tui(stdscr, path: str, interval: float, style: str):
         except FileNotFoundError:
             content = ""
 
-        sections = parse_fastnetmon(content) if content else {"Incoming": [], "Outgoing": [], "Internal": [], "Other": []}
+        sections = parse_fn(content) if content else {"Incoming": [], "Outgoing": [], "Internal": [], "Other": []}
 
         # Current maxima across all rows
         cur_pps = 1
         cur_mbps = 1
+        max_label_len = 0
         for rows in sections.values():
             for r in rows:
                 cur_pps = max(cur_pps, r.pps)
                 cur_mbps = max(cur_mbps, r.mbps)
+                max_label_len = max(max_label_len, len(r.label))
 
         if autoscale:
             max_pps = max(cur_pps, max_pps * decay)
@@ -159,13 +205,13 @@ def run_tui(stdscr, path: str, interval: float, style: str):
         h, w = stdscr.getmaxyx()
 
         # Header
-        title = f"FastNetMon TUI — Matt Perkins - watching {path}  (q=quit r=reset +/-=rate a=autoscale:{'ON' if autoscale else 'OFF'})  style={style}"
+        title = f"FastNetMon TUI — watching {path}  (q=quit r=reset +/-=rate a=autoscale:{'ON' if autoscale else 'OFF'})  style={style}"
         stdscr.attron(curses.color_pair(4))
         stdscr.addstr(0, 0, title[:w-1])
         stdscr.attroff(curses.color_pair(4))
 
-        # ---- Layout
-        left_label_w = max(16, min(32, w // 4))
+        # ---- Layout (label column auto-sizes to longest label, capped)
+        left_label_w = max(16, min(60, max_label_len + 1))
 
         # PPS value column auto-sizes based on current max_pps (with commas)
         pps_digits = len(f"{int(max_pps):,}")
@@ -244,9 +290,15 @@ def run_tui(stdscr, path: str, interval: float, style: str):
             elif ch == ord('-'):
                 interval = min(5.0, interval * 1.25)
 
+def make_parser(ipv6: bool) -> Callable[[str], Dict[str, List[Row]]]:
+    ip_re = IPV6_LINE_RE if ipv6 else IPV4_LINE_RE
+    return lambda text: parse_fastnetmon(text, ip_re)
+
 def main():
-    ap = argparse.ArgumentParser(description="Unicode/curses VU-style monitor for FastNetMon summary file.")
+    ap = argparse.ArgumentParser(description="Unicode/curses VU-style monitor for FastNetMon summary file (IPv4/IPv6).")
     ap.add_argument('-f', '--file', default=None, help='Path to FastNetMon summary file (overrides config)')
+    ap.add_argument('-c', '--config', default='/etc/fastnetmon.conf', help='Path to fastnetmon.conf (default: /etc/fastnetmon.conf)')
+    ap.add_argument('-6', '--ipv6', action='store_true', help='Use IPv6 stats file and IPv6 parser')
     ap.add_argument('-i', '--interval', type=float, default=0.33, help='Refresh interval seconds (default 0.33s)')
     ap.add_argument('--style', choices=['blocks', 'dots'], default='dots',
                     help='Bar glyph style: dots (•) or blocks (█). Default: dots')
@@ -255,9 +307,13 @@ def main():
     # Determine stats file path: CLI arg > config > fallback
     dat_path = args.file
     if dat_path is None:
-        dat_path = get_dat_file_from_conf() or "/tmp/fastnetmon.dat"
+        dat_path = get_dat_file_from_conf(args.config, ipv6=args.ipv6)
+        if dat_path is None:
+            # Final fallbacks
+            dat_path = "/tmp/fastnetmon_ipv6.dat" if args.ipv6 else "/tmp/fastnetmon.dat"
 
-    curses.wrapper(run_tui, dat_path, max(0.05, args.interval), args.style)
+    parse_fn = make_parser(args.ipv6)
+    curses.wrapper(run_tui, dat_path, max(0.05, args.interval), args.style, parse_fn)
 
 if __name__ == "__main__":
     main()
