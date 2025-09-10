@@ -191,10 +191,15 @@ def run_tui(stdscr, path: str, interval: float, style: str,
         stdscr.erase()
         h, w = stdscr.getmaxyx()
 
-        title = f"FastNetMon TUI — watching {path}  (q=quit r=reset +/-=rate a=autoscale:{'ON' if autoscale else 'OFF'} s=style:{current_style})"
+        # Header split across two lines
+        title1 = f"FastNetMon TUI Matt Perkins © — watching {path}"
+        title2 = f"(q=quit r=reset +/-=rate a=autoscale:{'ON' if autoscale else 'OFF'} s=style:{current_style})"
+
         stdscr.attron(curses.color_pair(4))
-        stdscr.addstr(0, 0, title[:w-1])
+        stdscr.addstr(0, 0, title1[:w-1])
+        stdscr.addstr(1, 0, title2[:w-1])
         stdscr.attroff(curses.color_pair(4))
+
 
         left_label_w = max(16, min(60, max_label_len + 1))
         pps_digits = len(f"{int(max_pps):,}")
@@ -208,7 +213,7 @@ def run_tui(stdscr, path: str, interval: float, style: str,
         mbps_bar_x  = pps_text_x + pps_val_w + gap_w
         mbps_text_x = mbps_bar_x + mbps_bar_w + 1
 
-        row_y = 2
+        row_y = 3  
         for sec_name in ("Incoming", "Outgoing", "Internal", "Other"):
             rows = sections.get(sec_name, [])
             if row_y >= h - 3:
