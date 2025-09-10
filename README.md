@@ -40,4 +40,3 @@ python3 fastnetmon_tui
 
 ## Todo
 
-IPv6 support 
